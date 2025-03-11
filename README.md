@@ -1,7 +1,7 @@
 # mcprotocol-rs
 
 [![Crates.io](https://img.shields.io/crates/v/mcprotocol-rs.svg)](https://crates.io/crates/mcprotocol-rs)
-[![Documentation](https://docs.rs/mcprotocol-rs/badge.svg)](https://docs.rs/mcprotocol-rs)
+[![Documentation](https://docs.rs/mcprotocol-rs/badge.svg)](https://docs.rs/crate/mcprotocol-rs/latest)
 [![License:MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 > ⚠️ **开发状态**: 本项目目前处于积极开发中，API 可能会发生变化。
