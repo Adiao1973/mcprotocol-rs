@@ -14,14 +14,14 @@ use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 
-/// HTTP 服务器配置
+/// HTTP server configuration
 #[derive(Clone)]
 pub struct HttpServerConfig {
     pub addr: SocketAddr,
     pub auth_token: Option<String>,
 }
 
-/// Axum HTTP 服务器实现
+/// Axum HTTP server implementation
 pub struct AxumHttpServer {
     config: HttpServerConfig,
     tx: broadcast::Sender<Message>,
@@ -37,13 +37,13 @@ impl Clone for AxumHttpServer {
 }
 
 impl AxumHttpServer {
-    /// 创建新的 Axum HTTP 服务器
+    /// Create a new Axum HTTP server
     pub fn new(config: HttpServerConfig) -> Self {
         let (tx, _) = broadcast::channel(32);
         Self { config, tx }
     }
 
-    /// 创建 Axum 路由
+    /// Create Axum router
     fn create_router(state: Arc<Self>) -> Router {
         Router::new()
             .route("/events", get(Self::sse_handler))
@@ -51,7 +51,7 @@ impl AxumHttpServer {
             .with_state(state)
     }
 
-    /// SSE 事件处理器
+    /// SSE event handler
     async fn sse_handler(
         State(state): State<Arc<Self>>,
     ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
@@ -67,7 +67,7 @@ impl AxumHttpServer {
         Sse::new(stream)
     }
 
-    /// 消息处理器
+    /// Message handler
     async fn message_handler(
         State(state): State<Arc<Self>>,
         Json(message): Json<Message>,
@@ -113,10 +113,10 @@ impl super::HttpTransport for AxumHttpServer {
     }
 
     async fn close(&mut self) -> Result<()> {
-        // Axum 服务器会在 drop 时自动关闭
+        // Axum server will close automatically when dropped
         Ok(())
     }
 }
 
-/// 默认 HTTP 服务器类型
+/// Default HTTP server type
 pub type DefaultHttpServer = AxumHttpServer;

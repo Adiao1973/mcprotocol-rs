@@ -120,13 +120,13 @@ impl ServerTransportFactory {
     }
 }
 
-// 包装类型，用于实现 Transport trait
+// Wrapper types for implementing Transport trait
 struct StdioClientTransport(stdio::client::StdioClient);
 struct StdioServerTransport(stdio::server::StdioServer);
 struct HttpClientTransport(http::client::HttpClient);
 struct HttpServerTransport(http::server::AxumHttpServer);
 
-// 为包装类型实现 Transport trait
+// Implement Transport trait for wrapper types
 macro_rules! impl_transport {
     ($wrapper:ident, $inner:ident) => {
         #[async_trait]
