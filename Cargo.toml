@@ -4,7 +4,17 @@ version = "0.1.0"
 edition = "2021"
 description = "A Rust implementation of the Model Context Protocol (MCP)"
 license = "MIT"
-repository = "https://github.com/yourusername/mcprotocol-rs"
+repository = "https://github.com/Adiao1973/mcprotocol-rs"
+authors = ["Adiao <mzhou7626@gmail.com>"]
+keywords = ["mcp", "protocol", "ai", "model", "context"]
+categories = [
+    "api-bindings",
+    "development-tools",
+    "network-programming",
+    "asynchronous",
+]
+documentation = "https://docs.rs/mcprotocol-rs"
+readme = "README.md"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
