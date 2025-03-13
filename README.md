@@ -111,16 +111,23 @@ async fn main() -> Result<()> {
 First create the server program `examples/stdio_server.rs`:
 
 ```rust
+use mcprotocol_rs::message;
 use mcprotocol_rs::{
     protocol::{Message, Response},
     transport::{ServerTransportFactory, TransportConfig, TransportType},
     Result,
 };
 use serde_json::json;
+use std::collections::HashSet;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 跟踪会话中使用的请求 ID
+    // Track request IDs used in the session
+    let mut session_ids = HashSet::new();
+
     // 配置 Stdio 服务器
+    // Configure Stdio server
     let config = TransportConfig {
         transport_type: TransportType::Stdio {
             server_path: None,
@@ -130,32 +137,82 @@ async fn main() -> Result<()> {
     };
 
     // 创建服务器实例
+    // Create server instance
     let factory = ServerTransportFactory;
     let mut server = factory.create(config)?;
 
     // 初始化服务器
+    // Initialize server
     server.initialize().await?;
     eprintln!("Server initialized and ready to receive messages...");
 
     // 持续接收和处理消息
+    // Continuously receive and process messages
     loop {
         match server.receive().await {
             Ok(message) => {
                 eprintln!("Received message: {:?}", message);
-                if let Message::Request(request) = message {
-                    // 创建响应消息
-                    let response = Message::Response(Response::success(
-                        json!({
-                            "content": "Hello from server!",
-                            "role": "assistant"
-                        }),
-                        request.id,
-                    ));
-                    
-                    // 发送响应
-                    if let Err(e) = server.send(response).await {
-                        eprintln!("Error sending response: {}", e);
-                        break;
+
+                // 根据消息类型处理
+                // Process messages based on type
+                match message {
+                    Message::Request(request) => {
+                        // 验证请求 ID 的唯一性
+                        // Validate request ID uniqueness
+                        if !request.validate_id_uniqueness(&mut session_ids) {
+                            let error = Message::Response(Response::error(
+                                message::ResponseError {
+                                    code: message::error_codes::INVALID_REQUEST,
+                                    message: "Request ID has already been used".to_string(),
+                                    data: None,
+                                },
+                                request.id,
+                            ));
+                            if let Err(e) = server.send(error).await {
+                                eprintln!("Error sending error response: {}", e);
+                                break;
+                            }
+                            continue;
+                        }
+
+                        match request.method.as_str() {
+                            "prompts/execute" => {
+                                // 创建响应消息
+                                // Create response message
+                                let response = Message::Response(Response::success(
+                                    json!({
+                                        "content": "Hello from server!",
+                                        "role": "assistant"
+                                    }),
+                                    request.id,
+                                ));
+
+                                // 发送响应
+                                // Send response
+                                if let Err(e) = server.send(response).await {
+                                    eprintln!("Error sending response: {}", e);
+                                    break;
+                                }
+                            }
+                            _ => {
+                                eprintln!("Unknown method: {}", request.method);
+                                let error = Message::Response(Response::error(
+                                    message::ResponseError {
+                                        code: message::error_codes::METHOD_NOT_FOUND,
+                                        message: "Method not found".to_string(),
+                                        data: None,
+                                    },
+                                    request.id,
+                                ));
+                                if let Err(e) = server.send(error).await {
+                                    eprintln!("Error sending error response: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        eprintln!("Unexpected message type");
                     }
                 }
             }
@@ -166,6 +223,8 @@ async fn main() -> Result<()> {
         }
     }
 
+    // 关闭服务器
+    // Close server
     server.close().await?;
     Ok(())
 }
@@ -181,15 +240,21 @@ use mcprotocol_rs::{
     Result,
 };
 use serde_json::json;
-use std::{env, time::Duration};
+use std::{collections::HashSet, env, time::Duration};
 use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 跟踪会话中使用的请求 ID
+    // Track request IDs used in the session
+    let mut session_ids = HashSet::new();
+
     // 获取服务器程序路径
+    // Get server program path
     let server_path = env::current_dir()?.join("target/debug/examples/stdio_server");
 
     // 配置 Stdio 客户端
+    // Configure Stdio client
     let config = TransportConfig {
         transport_type: TransportType::Stdio {
             server_path: Some(server_path.to_str().unwrap().to_string()),
@@ -199,38 +264,61 @@ async fn main() -> Result<()> {
     };
 
     // 创建客户端实例
+    // Create client instance
     let factory = ClientTransportFactory;
     let mut client = factory.create(config)?;
 
     // 初始化客户端
+    // Initialize client
     client.initialize().await?;
     eprintln!("Client initialized and connected to server...");
 
     // 等待服务器初始化完成
+    // Wait for server initialization to complete
     sleep(Duration::from_millis(100)).await;
 
-    // 创建并发送消息
+    // 创建请求
+    // Create request
     let request_id = RequestId::Number(1);
-    let message = Message::Request(Request::new(
+    let request = Request::new(
         Method::ExecutePrompt,
         Some(json!({
             "content": "Hello from client!",
             "role": "user"
         })),
         request_id,
-    ));
+    );
 
+    // 验证请求 ID 的唯一性
+    // Validate request ID uniqueness
+    if !request.validate_id_uniqueness(&mut session_ids) {
+        eprintln!("Request ID has already been used in this session");
+        return Ok(());
+    }
+
+    // 发送消息
+    // Send message
     eprintln!("Sending message to server...");
-    client.send(message).await?;
+    client.send(Message::Request(request)).await?;
 
     // 接收服务器响应
+    // Receive server response
     match client.receive().await {
         Ok(response) => {
             eprintln!("Received response: {:?}", response);
-            if let Message::Response(resp) = response {
-                if let Some(result) = resp.result {
-                    eprintln!("Server response: {}", result);
+            match response {
+                Message::Response(resp) => {
+                    if let Some(result) = resp.result {
+                        eprintln!("Server response result: {}", result);
+                    }
+                    if let Some(error) = resp.error {
+                        eprintln!(
+                            "Server response error: {} (code: {})",
+                            error.message, error.code
+                        );
+                    }
                 }
+                _ => eprintln!("Unexpected response type"),
             }
         }
         Err(e) => {
@@ -238,6 +326,8 @@ async fn main() -> Result<()> {
         }
     }
 
+    // 关闭客户端
+    // Close client
     client.close().await?;
     Ok(())
 }
