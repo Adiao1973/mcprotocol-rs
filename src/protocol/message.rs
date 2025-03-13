@@ -145,7 +145,7 @@ impl Request {
     /// Creates a new request
     pub fn new(method: Method, params: Option<Value>, id: RequestId) -> Self {
         Self {
-            jsonrpc: super::PROTOCOL_VERSION.to_string(),
+            jsonrpc: super::JSONRPC_VERSION.to_string(),
             method: method.to_string(),
             params,
             id,
@@ -157,7 +157,7 @@ impl Response {
     /// Creates a new successful response
     pub fn success(result: Value, id: RequestId) -> Self {
         Self {
-            jsonrpc: super::PROTOCOL_VERSION.to_string(),
+            jsonrpc: super::JSONRPC_VERSION.to_string(),
             result: Some(result),
             error: None,
             id,
@@ -167,7 +167,7 @@ impl Response {
     /// Creates a new error response
     pub fn error(error: ResponseError, id: RequestId) -> Self {
         Self {
-            jsonrpc: super::PROTOCOL_VERSION.to_string(),
+            jsonrpc: super::JSONRPC_VERSION.to_string(),
             result: None,
             error: Some(error),
             id,
@@ -179,7 +179,7 @@ impl Notification {
     /// Creates a new notification
     pub fn new(method: Method, params: Option<Value>) -> Self {
         Self {
-            jsonrpc: super::PROTOCOL_VERSION.to_string(),
+            jsonrpc: super::JSONRPC_VERSION.to_string(),
             method: method.to_string(),
             params,
         }

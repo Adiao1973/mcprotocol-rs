@@ -7,6 +7,7 @@ pub use message::*;
 
 /// Current protocol version
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
+pub const JSONRPC_VERSION: &str = "2.0";
 
 /// Represents a unique identifier for JSON-RPC requests
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -105,50 +105,156 @@ async fn main() -> Result<()> {
 }
 ```
 
-### Stdio 客户端示例 | Stdio Client Example
+### Stdio 传输示例 | Stdio Transport Example
+
+首先创建服务器程序 `examples/stdio_server.rs`：
+First create the server program `examples/stdio_server.rs`:
 
 ```rust
 use mcprotocol_rs::{
-    transport::{
-        ClientTransportFactory,
-        TransportConfig,
-        TransportType,
-    },
-    protocol::Message,
+    protocol::{Message, Response},
+    transport::{ServerTransportFactory, TransportConfig, TransportType},
     Result,
 };
+use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 配置 Stdio 客户端
+    // 配置 Stdio 服务器
     let config = TransportConfig {
         transport_type: TransportType::Stdio {
-            server_path: Some("path/to/mcp-server".to_string()),
-            server_args: Some(vec!["--arg1".to_string(), "--arg2".to_string()]),
+            server_path: None,
+            server_args: None,
         },
         parameters: None,
     };
 
-    // 使用工厂创建客户端
+    // 创建服务器实例
+    let factory = ServerTransportFactory;
+    let mut server = factory.create(config)?;
+
+    // 初始化服务器
+    server.initialize().await?;
+    eprintln!("Server initialized and ready to receive messages...");
+
+    // 持续接收和处理消息
+    loop {
+        match server.receive().await {
+            Ok(message) => {
+                eprintln!("Received message: {:?}", message);
+                if let Message::Request(request) = message {
+                    // 创建响应消息
+                    let response = Message::Response(Response::success(
+                        json!({
+                            "content": "Hello from server!",
+                            "role": "assistant"
+                        }),
+                        request.id,
+                    ));
+                    
+                    // 发送响应
+                    if let Err(e) = server.send(response).await {
+                        eprintln!("Error sending response: {}", e);
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Error receiving message: {}", e);
+                break;
+            }
+        }
+    }
+
+    server.close().await?;
+    Ok(())
+}
+```
+
+然后创建客户端程序 `examples/stdio_client.rs`：
+Then create the client program `examples/stdio_client.rs`:
+
+```rust
+use mcprotocol_rs::{
+    protocol::{Message, Method, Request, RequestId},
+    transport::{ClientTransportFactory, TransportConfig, TransportType},
+    Result,
+};
+use serde_json::json;
+use std::{env, time::Duration};
+use tokio::time::sleep;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // 获取服务器程序路径
+    let server_path = env::current_dir()?.join("target/debug/examples/stdio_server");
+
+    // 配置 Stdio 客户端
+    let config = TransportConfig {
+        transport_type: TransportType::Stdio {
+            server_path: Some(server_path.to_str().unwrap().to_string()),
+            server_args: None,
+        },
+        parameters: None,
+    };
+
+    // 创建客户端实例
     let factory = ClientTransportFactory;
     let mut client = factory.create(config)?;
 
     // 初始化客户端
     client.initialize().await?;
+    eprintln!("Client initialized and connected to server...");
 
-    // 发送消息
-    let message = Message::new(); // 创建你的消息
+    // 等待服务器初始化完成
+    sleep(Duration::from_millis(100)).await;
+
+    // 创建并发送消息
+    let request_id = RequestId::Number(1);
+    let message = Message::Request(Request::new(
+        Method::ExecutePrompt,
+        Some(json!({
+            "content": "Hello from client!",
+            "role": "user"
+        })),
+        request_id,
+    ));
+
+    eprintln!("Sending message to server...");
     client.send(message).await?;
 
-    // 接收响应
-    let response = client.receive().await?;
-    println!("Received: {:?}", response);
+    // 接收服务器响应
+    match client.receive().await {
+        Ok(response) => {
+            eprintln!("Received response: {:?}", response);
+            if let Message::Response(resp) = response {
+                if let Some(result) = resp.result {
+                    eprintln!("Server response: {}", result);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error receiving response: {}", e);
+        }
+    }
 
-    // 关闭客户端
     client.close().await?;
     Ok(())
 }
 ```
+
+运行示例 | Running the example:
+
+```bash
+# 1. 首先编译服务器程序 | First, build the server
+cargo build --example stdio_server
+
+# 2. 然后运行客户端程序 | Then run the client
+cargo run --example stdio_client
+```
+
+客户端会自动启动服务器进程并通过标准输入/输出进行通信。
+The client will automatically start the server process and communicate through stdin/stdout.
 
 ## 自定义传输实现 | Custom Transport Implementation
 
