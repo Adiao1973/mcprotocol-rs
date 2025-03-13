@@ -540,4 +540,155 @@ mod tests {
         assert!(matches!(parsed, Message::Request(_)));
         assert!(!matches!(parsed, Message::Notification(_)));
     }
+
+    #[test]
+    fn test_initialization_protocol_compliance() {
+        // Test initialize request format
+        // 测试初始化请求格式
+        let request = Request::new(
+            Method::Initialize,
+            Some(json!({
+                "protocolVersion": super::super::PROTOCOL_VERSION,
+                "capabilities": {
+                    "roots": {
+                        "listChanged": true
+                    },
+                    "sampling": {}
+                },
+                "clientInfo": {
+                    "name": "TestClient",
+                    "version": "1.0.0"
+                }
+            })),
+            RequestId::Number(1),
+        );
+
+        let request_json = serde_json::to_string(&request).unwrap();
+
+        // Verify request format
+        // 验证请求格式
+        assert!(request_json.contains(r#""method":"initialize""#));
+        assert!(request_json.contains(super::super::PROTOCOL_VERSION));
+        assert!(request_json.contains(r#""capabilities""#));
+        assert!(request_json.contains(r#""clientInfo""#));
+
+        // Test initialize response format
+        // 测试初始化响应格式
+        let response = Response::success(
+            json!({
+                "protocolVersion": super::super::PROTOCOL_VERSION,
+                "capabilities": {
+                    "prompts": {
+                        "listChanged": true
+                    },
+                    "resources": {
+                        "subscribe": true,
+                        "listChanged": true
+                    },
+                    "tools": {
+                        "listChanged": true
+                    },
+                    "logging": {}
+                },
+                "serverInfo": {
+                    "name": "TestServer",
+                    "version": "1.0.0"
+                }
+            }),
+            RequestId::Number(1),
+        );
+
+        let response_json = serde_json::to_string(&response).unwrap();
+
+        // Verify response format
+        // 验证响应格式
+        assert!(response_json.contains(super::super::PROTOCOL_VERSION));
+        assert!(response_json.contains(r#""capabilities""#));
+        assert!(response_json.contains(r#""serverInfo""#));
+
+        // Test initialized notification format
+        // 测试初始化完成通知格式
+        let notification = Notification::new(Method::Initialized, None);
+        let notification_json = serde_json::to_string(&notification).unwrap();
+
+        // Verify notification format
+        // 验证通知格式
+        assert!(notification_json.contains(r#""method":"initialized""#));
+        assert!(!notification_json.contains(r#""id""#));
+    }
+
+    #[test]
+    fn test_initialization_version_negotiation() {
+        // Test server accepting client version
+        // 测试服务器接受客户端版本
+        let client_request = Request::new(
+            Method::Initialize,
+            Some(json!({
+                "protocolVersion": super::super::PROTOCOL_VERSION
+            })),
+            RequestId::Number(1),
+        );
+
+        let server_response = Response::success(
+            json!({
+                "protocolVersion": super::super::PROTOCOL_VERSION
+            }),
+            RequestId::Number(1),
+        );
+
+        let client_version: String = serde_json::from_value(
+            client_request
+                .params
+                .unwrap()
+                .get("protocolVersion")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+
+        let server_version: String = serde_json::from_value(
+            server_response
+                .result
+                .unwrap()
+                .get("protocolVersion")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+
+        // Verify version match
+        // 验证版本匹配
+        assert_eq!(client_version, server_version);
+        assert_eq!(client_version, super::super::PROTOCOL_VERSION);
+
+        // Test server rejecting unsupported version
+        // 测试服务器拒绝不支持的版本
+        let unsupported_version = "1.0.0";
+        let client_request = Request::new(
+            Method::Initialize,
+            Some(json!({
+                "protocolVersion": unsupported_version
+            })),
+            RequestId::Number(2),
+        );
+
+        let server_error = Response::error(
+            ResponseError {
+                code: error_codes::INVALID_REQUEST,
+                message: "Unsupported protocol version".to_string(),
+                data: Some(json!({
+                    "supported": [super::super::PROTOCOL_VERSION],
+                    "requested": unsupported_version
+                })),
+            },
+            RequestId::Number(2),
+        );
+
+        // Verify error response format
+        // 验证错误响应格式
+        let error_json = serde_json::to_string(&server_error).unwrap();
+        assert!(error_json.contains("Unsupported protocol version"));
+        assert!(error_json.contains(super::super::PROTOCOL_VERSION));
+        assert!(error_json.contains(unsupported_version));
+    }
 }
