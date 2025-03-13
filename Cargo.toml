@@ -1,6 +1,6 @@
 [package]
 name = "mcprotocol-rs"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "A Rust implementation of the Model Context Protocol (MCP)"
 license = "MIT"

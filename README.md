@@ -390,6 +390,243 @@ impl Transport for MyTransport {
 }
 ```
 
+### 生命周期示例 | Lifecycle Example
+
+首先创建服务器程序 `examples/lifecycle_server.rs`：
+First create the server program `examples/lifecycle_server.rs`:
+
+```rust
+use mcprotocol_rs::{
+    error_codes,
+    protocol::ServerCapabilities,
+    transport::{ServerTransportFactory, TransportConfig, TransportType},
+    ImplementationInfo, Message, Response, ResponseError, Result, PROTOCOL_VERSION,
+};
+use serde_json::json;
+use std::collections::HashSet;
+use tokio;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // 跟踪会话中使用的请求 ID
+    // Track request IDs used in the session
+    let mut session_ids = HashSet::new();
+
+    // 配置 Stdio 服务器
+    // Configure Stdio server
+    let config = TransportConfig {
+        transport_type: TransportType::Stdio {
+            server_path: None,
+            server_args: None,
+        },
+        parameters: None,
+    };
+
+    // 创建服务器实例
+    // Create server instance
+    let factory = ServerTransportFactory;
+    let mut server = factory.create(config)?;
+    let mut initialized = false;
+
+    // 启动服务器
+    // Start server
+    eprintln!("Server starting...");
+    server.initialize().await?;
+
+    // 处理消息循环
+    // Message handling loop
+    loop {
+        match server.receive().await {
+            Ok(message) => {
+                match message {
+                    Message::Request(request) => {
+                        // 验证请求 ID 的唯一性
+                        // Validate request ID uniqueness
+                        if !request.validate_id_uniqueness(&mut session_ids) {
+                            let error = ResponseError {
+                                code: error_codes::INVALID_REQUEST,
+                                message: "Request ID has already been used".to_string(),
+                                data: None,
+                            };
+                            let response = Response::error(error, request.id);
+                            server.send(Message::Response(response)).await?;
+                            continue;
+                        }
+
+                        match request.method.as_str() {
+                            "initialize" => {
+                                // 处理初始化请求
+                                // Handle initialize request
+                                // ... initialization logic ...
+                            }
+                            "shutdown" => {
+                                if !initialized {
+                                    // 如果未初始化，发送错误
+                                    // If not initialized, send error
+                                    let error = ResponseError {
+                                        code: error_codes::SERVER_NOT_INITIALIZED,
+                                        message: "Server not initialized".to_string(),
+                                        data: None,
+                                    };
+                                    let response = Response::error(error, request.id);
+                                    server.send(Message::Response(response)).await?;
+                                    continue;
+                                }
+                                // ... shutdown logic ...
+                            }
+                            _ => {
+                                // ... handle other requests ...
+                            }
+                        }
+                    }
+                    Message::Notification(notification) => {
+                        match notification.method.as_str() {
+                            "initialized" => {
+                                eprintln!("Server initialized");
+                                initialized = true;
+                            }
+                            "exit" => {
+                                eprintln!("Received exit notification");
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                eprintln!("Error receiving message: {}", e);
+                break;
+            }
+        }
+    }
+
+    server.close().await?;
+    Ok(())
+}
+```
+
+然后创建客户端程序 `examples/lifecycle_client.rs`：
+Then create the client program `examples/lifecycle_client.rs`:
+
+```rust
+use mcprotocol_rs::{
+    transport::{ClientTransportFactory, TransportConfig, TransportType},
+    ClientCapabilities, ImplementationInfo, Message, Method, Notification, Request, RequestId,
+    Result, PROTOCOL_VERSION,
+};
+use serde_json::json;
+use std::{collections::HashSet, env};
+use tokio;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // 跟踪会话中使用的请求 ID
+    // Track request IDs used in the session
+    let mut session_ids = HashSet::new();
+
+    // 获取服务器程序路径
+    // Get server program path
+    let server_path = env::current_dir()?.join("target/debug/examples/lifecycle_server");
+
+    // 配置 Stdio 客户端
+    // Configure Stdio client
+    let config = TransportConfig {
+        transport_type: TransportType::Stdio {
+            server_path: Some(server_path.to_str().unwrap().to_string()),
+            server_args: None,
+        },
+        parameters: None,
+    };
+
+    // 创建客户端实例
+    // Create client instance
+    let factory = ClientTransportFactory;
+    let mut client = factory.create(config)?;
+
+    // 初始化客户端
+    // Initialize client
+    client.initialize().await?;
+
+    // 发送初始化请求
+    // Send initialize request
+    let init_request = Request::new(
+        Method::Initialize,
+        Some(json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": ClientCapabilities {
+                roots: None,
+                sampling: None,
+                experimental: None,
+            },
+            "clientInfo": ImplementationInfo {
+                name: "Example Client".to_string(),
+                version: "1.0.0".to_string(),
+            }
+        })),
+        RequestId::Number(1),
+    );
+
+    // 验证请求 ID 的唯一性
+    // Validate request ID uniqueness
+    if !init_request.validate_id_uniqueness(&mut session_ids) {
+        eprintln!("Request ID has already been used in this session");
+        return Ok(());
+    }
+
+    client.send(Message::Request(init_request)).await?;
+
+    // 等待初始化响应并处理
+    // Wait for and handle initialization response
+    // ... handle response ...
+
+    // 发送关闭请求
+    // Send shutdown request
+    let shutdown_request = Request::new(Method::Shutdown, None, RequestId::Number(2));
+    
+    // 验证请求 ID 的唯一性
+    // Validate request ID uniqueness
+    if !shutdown_request.validate_id_uniqueness(&mut session_ids) {
+        eprintln!("Request ID has already been used in this session");
+        return Ok(());
+    }
+
+    client.send(Message::Request(shutdown_request)).await?;
+
+    // 发送退出通知
+    // Send exit notification
+    let exit_notification = Notification::new(Method::Exit, None);
+    client.send(Message::Notification(exit_notification)).await?;
+
+    client.close().await?;
+    Ok(())
+}
+```
+
+运行生命周期示例 | Running the lifecycle example:
+
+```bash
+# 1. 首先编译服务器程序 | First, build the server
+cargo build --example lifecycle_server
+
+# 2. 然后运行客户端程序 | Then run the client
+cargo run --example lifecycle_client
+```
+
+这个示例展示了完整的 MCP 生命周期，包括：
+This example demonstrates the complete MCP lifecycle, including:
+
+- 初始化阶段（initialize 请求和 initialized 通知）
+- 会话 ID 跟踪和验证
+- 版本协商
+- 优雅关闭（shutdown 请求和 exit 通知）
+
+- Initialization phase (initialize request and initialized notification)
+- Session ID tracking and validation
+- Version negotiation
+- Graceful shutdown (shutdown request and exit notification)
+
 ## 项目结构 | Project Structure
 
 ```
