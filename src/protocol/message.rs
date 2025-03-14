@@ -113,12 +113,10 @@ pub enum Method {
 
     // Utility methods
     // 实用方法
-    #[serde(rename = "$/cancelRequest")]
+    #[serde(rename = "notifications/cancelled")]
     Cancel,
-    #[serde(rename = "$/ping")]
+    #[serde(rename = "ping")]
     Ping,
-    #[serde(rename = "$/pong")]
-    Pong,
     #[serde(rename = "$/progress")]
     Progress,
 
@@ -236,9 +234,8 @@ impl fmt::Display for Method {
             Method::Initialized => write!(f, "initialized"),
             Method::Shutdown => write!(f, "shutdown"),
             Method::Exit => write!(f, "exit"),
-            Method::Cancel => write!(f, "$/cancelRequest"),
-            Method::Ping => write!(f, "$/ping"),
-            Method::Pong => write!(f, "$/pong"),
+            Method::Cancel => write!(f, "notifications/cancelled"),
+            Method::Ping => write!(f, "ping"),
             Method::Progress => write!(f, "$/progress"),
             Method::ListPrompts => write!(f, "prompts/list"),
             Method::GetPrompt => write!(f, "prompts/get"),
@@ -690,5 +687,100 @@ mod tests {
         assert!(error_json.contains("Unsupported protocol version"));
         assert!(error_json.contains(super::super::PROTOCOL_VERSION));
         assert!(error_json.contains(unsupported_version));
+    }
+
+    #[test]
+    fn test_ping_mechanism() {
+        // 测试 ping 请求格式
+        // Test ping request format
+        let ping_request =
+            Request::new(Method::Ping, None, RequestId::String("ping-1".to_string()));
+
+        // 验证请求格式
+        // Verify request format
+        let request_json = serde_json::to_string(&ping_request).unwrap();
+        assert!(request_json.contains(r#""method":"ping""#));
+        assert!(request_json.contains(r#""id":"ping-1""#));
+        assert!(!request_json.contains("params"));
+
+        // 测试 ping 响应格式
+        // Test ping response format
+        let ping_response = Response::success(json!({}), RequestId::String("ping-1".to_string()));
+
+        // 验证响应格式
+        // Verify response format
+        let response_json = serde_json::to_string(&ping_response).unwrap();
+        assert!(response_json.contains(r#""result":{}"#));
+        assert!(response_json.contains(r#""id":"ping-1""#));
+        assert!(!response_json.contains("error"));
+
+        // 测试 ping 请求的 ID 唯一性
+        // Test ping request ID uniqueness
+        let mut session_ids = HashSet::new();
+        assert!(ping_request.validate_id_uniqueness(&mut session_ids));
+        assert!(!ping_request.validate_id_uniqueness(&mut session_ids));
+
+        // 测试 ping 响应必须匹配请求 ID
+        // Test ping response must match request ID
+        let mismatched_response =
+            Response::success(json!({}), RequestId::String("wrong-id".to_string()));
+        assert_ne!(ping_request.id, mismatched_response.id);
+
+        // 测试 ping 超时错误响应
+        // Test ping timeout error response
+        let timeout_error = Response::error(
+            ResponseError {
+                code: error_codes::REQUEST_CANCELLED,
+                message: "Ping timeout".to_string(),
+                data: None,
+            },
+            RequestId::String("ping-1".to_string()),
+        );
+
+        // 验证错误响应格式
+        // Verify error response format
+        let error_json = serde_json::to_string(&timeout_error).unwrap();
+        assert!(error_json.contains("Ping timeout"));
+        assert!(error_json.contains(&error_codes::REQUEST_CANCELLED.to_string()));
+    }
+
+    #[test]
+    fn test_ping_pong_sequence() {
+        // 测试完整的 ping-pong 序列
+        // Test complete ping-pong sequence
+        let mut session_ids = HashSet::new();
+
+        // 1. 发送 ping 请求
+        // 1. Send ping request
+        let ping_request = Request::new(
+            Method::Ping,
+            None,
+            RequestId::String("ping-seq-1".to_string()),
+        );
+        assert!(ping_request.validate_id_uniqueness(&mut session_ids));
+
+        // 2. 接收 pong 响应
+        // 2. Receive pong response
+        let pong_response =
+            Response::success(json!({}), RequestId::String("ping-seq-1".to_string()));
+
+        // 验证响应匹配请求
+        // Verify response matches request
+        assert_eq!(ping_request.id, pong_response.id);
+        assert!(pong_response.result.is_some());
+        assert!(pong_response.error.is_none());
+
+        // 3. 测试多个 ping 请求
+        // 3. Test multiple ping requests
+        let ping_request_2 = Request::new(
+            Method::Ping,
+            None,
+            RequestId::String("ping-seq-2".to_string()),
+        );
+        assert!(ping_request_2.validate_id_uniqueness(&mut session_ids));
+
+        // 验证不同 ping 请求的 ID 不同
+        // Verify different ping requests have different IDs
+        assert_ne!(ping_request.id, ping_request_2.id);
     }
 }
