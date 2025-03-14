@@ -1,17 +1,19 @@
 use mcprotocol_rs::{
-    error_codes,
     transport::{ClientTransportFactory, ServerTransportFactory, TransportConfig, TransportType},
-    Message, Method, Notification, Request, RequestId, Response, ResponseError, Result,
+    Message, Method, Notification, Request, RequestId, Result,
 };
-use serde_json::json;
 use std::{collections::HashSet, time::Duration};
 use tokio::{self, time::sleep, time::timeout};
 
-const PING_INTERVAL: Duration = Duration::from_secs(5);
+// 调整超时设置以匹配服务器端配置
+// Adjust timeout settings to match server configuration
+const PING_INTERVAL: Duration = Duration::from_secs(60); // 每分钟发送一次 ping 以保持活跃
 const PING_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVER_TIMEOUT: Duration = Duration::from_secs(300); // 5 分钟服务器超时
 const SERVER_PORT: u16 = 3000;
 const SERVER_URL: &str = "127.0.0.1:3000";
+const AUTH_TOKEN: &str = "test-auth-token";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -48,7 +50,7 @@ async fn run_server() -> Result<()> {
     let config = TransportConfig {
         transport_type: TransportType::Http {
             base_url: SERVER_URL.to_string(),
-            auth_token: None,
+            auth_token: Some(AUTH_TOKEN.to_string()),
         },
         parameters: None,
     };
@@ -66,8 +68,8 @@ async fn run_server() -> Result<()> {
         SERVER_PORT
     );
 
-    // 等待退出信号
-    // Wait for exit signal
+    // 等待退出信号或超时
+    // Wait for exit signal or timeout
     let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
 
     let exit_signal = async move {
@@ -78,8 +80,8 @@ async fn run_server() -> Result<()> {
         _ = exit_signal => {
             eprintln!("Server received exit signal");
         }
-        _ = tokio::time::sleep(Duration::from_secs(30)) => {
-            eprintln!("Server timeout after 30 seconds");
+        _ = tokio::time::sleep(SERVER_TIMEOUT) => {
+            eprintln!("Server timeout after {} seconds", SERVER_TIMEOUT.as_secs());
         }
     }
 
@@ -93,13 +95,14 @@ async fn run_client() -> Result<()> {
     // Track request IDs used in the session
     let mut session_ids = HashSet::new();
     let mut ping_count = 0;
+    let total_pings = 3;
 
     // 配置客户端
     // Configure client
     let config = TransportConfig {
         transport_type: TransportType::Http {
             base_url: format!("http://{}", SERVER_URL),
-            auth_token: None,
+            auth_token: Some(AUTH_TOKEN.to_string()),
         },
         parameters: None,
     };
@@ -121,9 +124,18 @@ async fn run_client() -> Result<()> {
     }
     eprintln!("Client started");
 
-    // 发送 3 次 ping 请求
-    // Send 3 ping requests
-    while ping_count < 3 {
+    // 发送 ping 请求并保持连接活跃
+    // Send ping requests and keep connection alive
+    let start_time = std::time::Instant::now();
+
+    while ping_count < total_pings {
+        // 检查是否接近服务器超时时间
+        // Check if approaching server timeout
+        if start_time.elapsed() > SERVER_TIMEOUT - Duration::from_secs(30) {
+            eprintln!("Approaching server timeout, ending session");
+            break;
+        }
+
         // 发送 ping 请求
         // Send ping request
         let request_id = RequestId::String(format!("ping-{}", ping_count + 1));
@@ -141,11 +153,8 @@ async fn run_client() -> Result<()> {
 
         // 等待 pong 响应，带超时
         // Wait for pong response with timeout
-        let response = timeout(PING_TIMEOUT, client.receive()).await;
-        match response {
+        match timeout(PING_TIMEOUT, client.receive()).await {
             Ok(Ok(Message::Response(response))) => {
-                // 验证响应 ID 是否匹配
-                // Verify response ID matches
                 if !request_id_matches(&request_id, &response.id) {
                     eprintln!(
                         "Received response with mismatched ID: expected {}, got {}",
@@ -176,54 +185,46 @@ async fn run_client() -> Result<()> {
         }
 
         ping_count += 1;
-        if ping_count < 3 {
-            sleep(PING_INTERVAL).await;
+        if ping_count < total_pings {
+            // 使用较短的间隔以避免服务器超时
+            // Use shorter interval to avoid server timeout
+            sleep(PING_INTERVAL.min(Duration::from_secs(30))).await;
         }
     }
 
     // 发送关闭请求
     // Send shutdown request
-    let shutdown_request = Request::new(
-        Method::Shutdown,
-        None,
-        RequestId::String("shutdown".to_string()),
-    );
+    if ping_count == total_pings {
+        let shutdown_request = Request::new(
+            Method::Shutdown,
+            None,
+            RequestId::String("shutdown".to_string()),
+        );
 
-    // 验证请求 ID 的唯一性
-    // Validate request ID uniqueness
-    if !shutdown_request.validate_id_uniqueness(&mut session_ids) {
-        eprintln!("Request ID has already been used in this session");
-        return Ok(());
-    }
+        if shutdown_request.validate_id_uniqueness(&mut session_ids) {
+            client.send(Message::Request(shutdown_request)).await?;
 
-    client.send(Message::Request(shutdown_request)).await?;
-
-    // 等待关闭响应
-    // Wait for shutdown response
-    match timeout(PING_TIMEOUT, client.receive()).await {
-        Ok(Ok(Message::Response(response))) => {
-            if response.error.is_some() {
-                eprintln!("Shutdown failed: {:?}", response.error);
-                return Ok(());
+            // 等待关闭响应
+            // Wait for shutdown response
+            match timeout(PING_TIMEOUT, client.receive()).await {
+                Ok(Ok(Message::Response(response))) => {
+                    if response.error.is_some() {
+                        eprintln!("Shutdown failed: {:?}", response.error);
+                    } else {
+                        // 发送退出通知
+                        // Send exit notification
+                        let exit_notification = Notification::new(Method::Exit, None);
+                        client
+                            .send(Message::Notification(exit_notification))
+                            .await?;
+                    }
+                }
+                Ok(Ok(_)) => eprintln!("Unexpected response type"),
+                Ok(Err(e)) => eprintln!("Error receiving shutdown response: {}", e),
+                Err(_) => eprintln!("Shutdown response timeout"),
             }
-            // 发送退出通知
-            // Send exit notification
-            let exit_notification = Notification::new(Method::Exit, None);
-            client
-                .send(Message::Notification(exit_notification))
-                .await?;
-        }
-        Ok(Ok(_)) => {
-            eprintln!("Unexpected response type");
-            return Ok(());
-        }
-        Ok(Err(e)) => {
-            eprintln!("Error receiving shutdown response: {}", e);
-            return Ok(());
-        }
-        Err(_) => {
-            eprintln!("Shutdown response timeout");
-            return Ok(());
+        } else {
+            eprintln!("Shutdown request ID has already been used in this session");
         }
     }
 

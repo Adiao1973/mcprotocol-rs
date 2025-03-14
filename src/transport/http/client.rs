@@ -20,6 +20,7 @@ pub struct HttpClient {
     client: Client,
     message_endpoint: Arc<Mutex<Option<String>>>,
     receiver: Mutex<Option<mpsc::Receiver<Message>>>,
+    client_id: Arc<Mutex<Option<String>>>,
 }
 
 impl HttpClient {
@@ -45,18 +46,26 @@ impl HttpClient {
             client,
             message_endpoint: Arc::new(Mutex::new(None)),
             receiver: Mutex::new(None),
+            client_id: Arc::new(Mutex::new(None)),
         })
     }
 
     /// Wait for and get endpoint event
     /// 等待并获取 endpoint 事件
-    async fn wait_for_endpoint(&self, event: &str) -> Option<String> {
+    fn wait_for_endpoint(event: &str) -> Option<(String, String)> {
         if event.trim().starts_with("event: endpoint\ndata:") {
             let data = event
                 .lines()
                 .find(|line| line.starts_with("data:"))
                 .map(|line| line[5..].trim().to_string())?;
-            return Some(data);
+
+            // 解析 JSON 数据
+            // Parse JSON data
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
+                let endpoint = json["endpoint"].as_str()?.to_string();
+                let client_id = json["clientId"].as_str()?.to_string();
+                return Some((endpoint, client_id));
+            }
         }
         None
     }
@@ -86,6 +95,7 @@ impl super::HttpTransport for HttpClient {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let message_endpoint = Arc::clone(&self.message_endpoint);
+        let client_id = Arc::clone(&self.client_id);
 
         tokio::spawn(async move {
             while let Some(Ok(chunk)) = stream.next().await {
@@ -107,12 +117,9 @@ impl super::HttpTransport for HttpClient {
                         // Handle endpoint event
                         // 处理 endpoint 事件
                         if event.contains("event: endpoint") {
-                            if let Some(endpoint) = event
-                                .lines()
-                                .find(|line| line.starts_with("data:"))
-                                .map(|line| line[5..].trim().to_string())
-                            {
+                            if let Some((endpoint, id)) = HttpClient::wait_for_endpoint(&event) {
                                 *message_endpoint.lock().unwrap() = Some(endpoint);
+                                *client_id.lock().unwrap() = Some(id);
                                 continue;
                             }
                         }
@@ -164,8 +171,17 @@ impl super::HttpTransport for HttpClient {
             .ok_or_else(|| crate::Error::Transport("Message endpoint not initialized".into()))?
             .clone();
 
+        let client_id = self
+            .client_id
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| crate::Error::Transport("Client ID not initialized".into()))?
+            .clone();
+
         self.client
             .post(&endpoint)
+            .header("X-Client-ID", client_id)
             .json(&message)
             .send()
             .await
@@ -195,6 +211,7 @@ impl super::HttpTransport for HttpClient {
 
     async fn close(&mut self) -> Result<()> {
         *self.message_endpoint.lock().unwrap() = None;
+        *self.client_id.lock().unwrap() = None;
         *self.receiver.lock().unwrap() = None;
         Ok(())
     }

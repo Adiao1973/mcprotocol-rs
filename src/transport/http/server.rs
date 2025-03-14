@@ -1,8 +1,10 @@
 use crate::protocol::{RequestId, Response};
-use crate::{protocol::Message, Result};
+use crate::{protocol::Message, Error, Result};
 use async_trait::async_trait;
 use axum::{
     extract::State,
+    http::StatusCode,
+    middleware::{self, Next},
     response::{
         sse::{Event, Sse},
         IntoResponse,
@@ -35,6 +37,9 @@ struct ClientInfo {
     /// Last request ID from this client
     /// 该客户端的最后一个请求 ID
     last_request_id: Option<RequestId>,
+    /// Client connection time
+    /// 客户端连接时间
+    connected_at: std::time::Instant,
 }
 
 /// Message sender channel type
@@ -88,13 +93,74 @@ impl AxumHttpServer {
         }
     }
 
+    /// Validate Bearer token from request headers
+    /// 验证请求头中的 Bearer token
+    fn validate_auth_token(
+        headers: &axum::http::HeaderMap,
+        auth_token: &Option<String>,
+    ) -> Result<()> {
+        if let Some(expected_token) = auth_token {
+            match headers.get("Authorization") {
+                Some(auth_header) => {
+                    let auth_str = auth_header
+                        .to_str()
+                        .map_err(|_| Error::Transport("Invalid authorization header".into()))?;
+
+                    if !auth_str.starts_with("Bearer ") {
+                        return Err(Error::Transport("Invalid authorization format".into()));
+                    }
+
+                    let token = &auth_str["Bearer ".len()..];
+                    if token != expected_token {
+                        return Err(Error::Transport("Invalid token".into()));
+                    }
+                }
+                None => return Err(Error::Transport("Missing authorization header".into())),
+            }
+        }
+        Ok(())
+    }
+
+    /// Authentication middleware
+    /// 认证中间件
+    async fn auth_middleware(
+        State(auth_token): State<Option<String>>,
+        headers: axum::http::HeaderMap,
+        request: axum::http::Request<axum::body::Body>,
+        next: Next,
+    ) -> impl IntoResponse {
+        match Self::validate_auth_token(&headers, &auth_token) {
+            Ok(_) => Ok(next.run(request).await),
+            Err(_) => Err(StatusCode::UNAUTHORIZED),
+        }
+    }
+
     /// Create Axum router
     /// 创建 Axum 路由器
     fn create_router(state: Arc<Self>) -> Router {
+        let auth_token = state.config.auth_token.clone();
+
         Router::new()
             .route("/events", get(Self::sse_handler))
             .route("/messages", post(Self::message_handler))
+            .layer(middleware::from_fn_with_state(
+                auth_token.clone(),
+                Self::auth_middleware,
+            ))
             .with_state(state)
+    }
+
+    /// Check and remove inactive clients
+    /// 检查并移除不活跃的客户端
+    async fn cleanup_inactive_clients(&self) {
+        let now = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(300); // 5 minutes timeout
+
+        let mut clients = self.clients.lock().await;
+        clients.retain(|_, info| {
+            let is_active = now.duration_since(info.connected_at) < timeout;
+            is_active
+        });
     }
 
     /// SSE event handler
@@ -112,19 +178,31 @@ impl AxumHttpServer {
         let client_info = ClientInfo {
             sender: tx,
             last_request_id: None,
+            connected_at: std::time::Instant::now(),
         };
         state.clients.lock().await.insert(client_id, client_info);
+
+        // Start periodic cleanup
+        // 启动定期清理
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                state_clone.cleanup_inactive_clients().await;
+            }
+        });
 
         // Create cleanup function
         // 创建清理函数
         let clients = state.clients.clone();
         let stream = async_stream::stream! {
-            // Send initial endpoint event
-            // 发送初始端点事件
+            // Send initial endpoint event with client ID
+            // 发送带有客户端 ID 的初始端点事件
             let endpoint = format!("http://{}/messages", state.config.addr);
             yield Ok(Event::default()
                 .event("endpoint")
-                .data(endpoint));
+                .data(format!("{{\"endpoint\":\"{}\",\"clientId\":\"{}\"}}", endpoint, client_id)));
 
             // Forward all messages until connection closes
             // 转发所有消息直到连接关闭
@@ -167,53 +245,60 @@ impl AxumHttpServer {
     /// 消息处理器
     async fn message_handler(
         State(state): State<Arc<Self>>,
+        headers: axum::http::HeaderMap,
         Json(message): Json<Message>,
     ) -> impl IntoResponse {
+        // Get client ID from request headers
+        // 从请求头中获取客户端 ID
+        let client_id = headers
+            .get("X-Client-ID")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+
+        // Update client's last activity time
+        // 更新客户端的最后活动时间
+        if let Some(client_id) = client_id {
+            if let Some(client_info) = state.clients.lock().await.get_mut(&client_id) {
+                client_info.connected_at = std::time::Instant::now();
+            }
+        }
+
         match &message {
             Message::Request(request) => {
-                // Find the most recently active client
-                // 查找最近活动的客户端
-                let client_id = {
-                    let mut clients = state.clients.lock().await;
-                    clients.iter_mut().next().map(|(id, _)| *id)
-                };
-
-                // If client found, update its last request ID
-                // 如果找到客户端，更新其最后请求 ID
                 if let Some(client_id) = client_id {
+                    // 更新客户端的最后请求 ID
+                    // Update client's last request ID
                     if let Some(client_info) = state.clients.lock().await.get_mut(&client_id) {
                         client_info.last_request_id = Some(request.id.clone());
                     }
-                }
 
-                let response = match request.method.as_str() {
-                    "ping" => {
-                        // Create pong response
-                        // 创建 pong 响应
-                        Response::success(json!({}), request.id.clone())
-                    }
-                    "shutdown" => {
-                        // Create shutdown response
-                        // 创建关闭响应
-                        Response::success(json!(null), request.id.clone())
-                    }
-                    _ => {
-                        // Create method not found error response
-                        // 创建方法未找到错误响应
-                        Response::error(
-                            crate::protocol::ResponseError {
-                                code: crate::error_codes::METHOD_NOT_FOUND,
-                                message: "Method not found".to_string(),
-                                data: None,
-                            },
-                            request.id.clone(),
-                        )
-                    }
-                };
+                    let response = match request.method.as_str() {
+                        "ping" => {
+                            // 创建 pong 响应
+                            // Create pong response
+                            Response::success(json!({}), request.id.clone())
+                        }
+                        "shutdown" => {
+                            // 创建关闭响应
+                            // Create shutdown response
+                            Response::success(json!(null), request.id.clone())
+                        }
+                        _ => {
+                            // 创建方法未找到错误响应
+                            // Create method not found error response
+                            Response::error(
+                                crate::protocol::ResponseError {
+                                    code: crate::error_codes::METHOD_NOT_FOUND,
+                                    message: "Method not found".to_string(),
+                                    data: None,
+                                },
+                                request.id.clone(),
+                            )
+                        }
+                    };
 
-                // Send response to the most recently active client
-                // 向最近活动的客户端发送响应
-                if let Some(client_id) = client_id {
+                    // 向发送请求的客户端发送响应
+                    // Send response to the requesting client
                     if let Some(client_info) = state.clients.lock().await.get(&client_id) {
                         let _ = client_info
                             .sender
@@ -223,21 +308,21 @@ impl AxumHttpServer {
             }
             Message::Notification(notification) => {
                 if notification.method.as_str() == "exit" {
-                    // Clean up all client connections
                     // 清理所有客户端连接
+                    // Clean up all client connections
                     state.clients.lock().await.clear();
                 }
-                // Notifications don't need responses
                 // 通知消息不需要响应
+                // Notifications don't need responses
             }
             _ => {
-                // Ignore other types of messages
                 // 忽略其他类型的消息
+                // Ignore other types of messages
             }
         }
 
-        // Return success response
         // 返回成功响应
+        // Return success response
         (axum::http::StatusCode::OK, "Message sent").into_response()
     }
 
