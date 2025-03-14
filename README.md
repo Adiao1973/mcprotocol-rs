@@ -68,7 +68,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mcprotocol-rs = "0.1.2"
+mcprotocol-rs = "0.1.5"
 ```
 
 ## 快速开始 | Quick Start
