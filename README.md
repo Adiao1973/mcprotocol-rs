@@ -21,6 +21,8 @@
     - 基于 axum 的高性能服务器实现
     - 支持 SSE 实时消息推送
     - 内置认证支持
+    - 自动管理客户端连接生命周期
+    - 精确的消息路由机制
   - 标准输入/输出传输
     - 符合 MCP 规范的子进程管理
     - 支持服务器日志捕获
@@ -42,6 +44,8 @@
     - High-performance server implementation based on axum
     - SSE real-time message push support
     - Built-in authentication support
+    - Automatic client connection lifecycle management
+    - Precise message routing mechanism
   - Standard input/output transport
     - MCP-compliant subprocess management
     - Server log capture support
@@ -69,7 +73,7 @@ mcprotocol-rs = "0.1.2"
 
 ## 快速开始 | Quick Start
 
-### HTTP 服务器示例 | HTTP Server Example
+### HTTP/SSE 服务器示例 | HTTP/SSE Server Example
 
 ```rust
 use mcprotocol_rs::{
@@ -80,185 +84,56 @@ use mcprotocol_rs::{
     },
     Result,
 };
+use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // 配置 HTTP 服务器
+    // Configure HTTP server
+    let addr = "127.0.0.1:3000".parse::<SocketAddr>().unwrap();
     let config = TransportConfig {
         transport_type: TransportType::Http {
-            base_url: "127.0.0.1:3000".to_string(),
+            base_url: addr.to_string(),
             auth_token: Some("your-auth-token".to_string()),
         },
         parameters: None,
     };
 
     // 使用工厂创建服务器
+    // Create server using factory
     let factory = ServerTransportFactory;
     let mut server = factory.create(config)?;
     
     // 初始化并启动服务器
+    // Initialize and start server
     server.initialize().await?;
+    println!("Server started on {}", addr);
 
     // 保持服务器运行
+    // Keep server running
     tokio::signal::ctrl_c().await?;
     Ok(())
 }
 ```
 
-### Stdio 传输示例 | Stdio Transport Example
-
-首先创建服务器程序 `examples/stdio_server.rs`：
-First create the server program `examples/stdio_server.rs`:
-
-```rust
-use mcprotocol_rs::message;
-use mcprotocol_rs::{
-    protocol::{Message, Response},
-    transport::{ServerTransportFactory, TransportConfig, TransportType},
-    Result,
-};
-use serde_json::json;
-use std::collections::HashSet;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // 跟踪会话中使用的请求 ID
-    // Track request IDs used in the session
-    let mut session_ids = HashSet::new();
-
-    // 配置 Stdio 服务器
-    // Configure Stdio server
-    let config = TransportConfig {
-        transport_type: TransportType::Stdio {
-            server_path: None,
-            server_args: None,
-        },
-        parameters: None,
-    };
-
-    // 创建服务器实例
-    // Create server instance
-    let factory = ServerTransportFactory;
-    let mut server = factory.create(config)?;
-
-    // 初始化服务器
-    // Initialize server
-    server.initialize().await?;
-    eprintln!("Server initialized and ready to receive messages...");
-
-    // 持续接收和处理消息
-    // Continuously receive and process messages
-    loop {
-        match server.receive().await {
-            Ok(message) => {
-                eprintln!("Received message: {:?}", message);
-
-                // 根据消息类型处理
-                // Process messages based on type
-                match message {
-                    Message::Request(request) => {
-                        // 验证请求 ID 的唯一性
-                        // Validate request ID uniqueness
-                        if !request.validate_id_uniqueness(&mut session_ids) {
-                            let error = Message::Response(Response::error(
-                                message::ResponseError {
-                                    code: message::error_codes::INVALID_REQUEST,
-                                    message: "Request ID has already been used".to_string(),
-                                    data: None,
-                                },
-                                request.id,
-                            ));
-                            if let Err(e) = server.send(error).await {
-                                eprintln!("Error sending error response: {}", e);
-                                break;
-                            }
-                            continue;
-                        }
-
-                        match request.method.as_str() {
-                            "prompts/execute" => {
-                                // 创建响应消息
-                                // Create response message
-                                let response = Message::Response(Response::success(
-                                    json!({
-                                        "content": "Hello from server!",
-                                        "role": "assistant"
-                                    }),
-                                    request.id,
-                                ));
-
-                                // 发送响应
-                                // Send response
-                                if let Err(e) = server.send(response).await {
-                                    eprintln!("Error sending response: {}", e);
-                                    break;
-                                }
-                            }
-                            _ => {
-                                eprintln!("Unknown method: {}", request.method);
-                                let error = Message::Response(Response::error(
-                                    message::ResponseError {
-                                        code: message::error_codes::METHOD_NOT_FOUND,
-                                        message: "Method not found".to_string(),
-                                        data: None,
-                                    },
-                                    request.id,
-                                ));
-                                if let Err(e) = server.send(error).await {
-                                    eprintln!("Error sending error response: {}", e);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        eprintln!("Unexpected message type");
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Error receiving message: {}", e);
-                break;
-            }
-        }
-    }
-
-    // 关闭服务器
-    // Close server
-    server.close().await?;
-    Ok(())
-}
-```
-
-然后创建客户端程序 `examples/stdio_client.rs`：
-Then create the client program `examples/stdio_client.rs`:
+### HTTP/SSE 客户端示例 | HTTP/SSE Client Example
 
 ```rust
 use mcprotocol_rs::{
-    protocol::{Message, Method, Request, RequestId},
     transport::{ClientTransportFactory, TransportConfig, TransportType},
+    protocol::{Message, Method, Request, RequestId},
     Result,
 };
 use serde_json::json;
-use std::{collections::HashSet, env, time::Duration};
-use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 跟踪会话中使用的请求 ID
-    // Track request IDs used in the session
-    let mut session_ids = HashSet::new();
-
-    // 获取服务器程序路径
-    // Get server program path
-    let server_path = env::current_dir()?.join("target/debug/examples/stdio_server");
-
-    // 配置 Stdio 客户端
-    // Configure Stdio client
+    // 配置 HTTP 客户端
+    // Configure HTTP client
     let config = TransportConfig {
-        transport_type: TransportType::Stdio {
-            server_path: Some(server_path.to_str().unwrap().to_string()),
-            server_args: None,
+        transport_type: TransportType::Http {
+            base_url: "http://127.0.0.1:3000".to_string(),
+            auth_token: Some("your-auth-token".to_string()),
         },
         parameters: None,
     };
@@ -271,60 +146,21 @@ async fn main() -> Result<()> {
     // 初始化客户端
     // Initialize client
     client.initialize().await?;
-    eprintln!("Client initialized and connected to server...");
+    println!("Client connected to server");
 
-    // 等待服务器初始化完成
-    // Wait for server initialization to complete
-    sleep(Duration::from_millis(100)).await;
-
-    // 创建请求
-    // Create request
-    let request_id = RequestId::Number(1);
+    // 创建并发送请求
+    // Create and send request
     let request = Request::new(
-        Method::ExecutePrompt,
-        Some(json!({
-            "content": "Hello from client!",
-            "role": "user"
-        })),
-        request_id,
+        Method::Ping,
+        None,
+        RequestId::String("ping-1".to_string()),
     );
-
-    // 验证请求 ID 的唯一性
-    // Validate request ID uniqueness
-    if !request.validate_id_uniqueness(&mut session_ids) {
-        eprintln!("Request ID has already been used in this session");
-        return Ok(());
-    }
-
-    // 发送消息
-    // Send message
-    eprintln!("Sending message to server...");
     client.send(Message::Request(request)).await?;
 
-    // 接收服务器响应
-    // Receive server response
-    match client.receive().await {
-        Ok(response) => {
-            eprintln!("Received response: {:?}", response);
-            match response {
-                Message::Response(resp) => {
-                    if let Some(result) = resp.result {
-                        eprintln!("Server response result: {}", result);
-                    }
-                    if let Some(error) = resp.error {
-                        eprintln!(
-                            "Server response error: {} (code: {})",
-                            error.message, error.code
-                        );
-                    }
-                }
-                _ => eprintln!("Unexpected response type"),
-            }
-        }
-        Err(e) => {
-            eprintln!("Error receiving response: {}", e);
-        }
-    }
+    // 接收响应
+    // Receive response
+    let response = client.receive().await?;
+    println!("Received response: {:?}", response);
 
     // 关闭客户端
     // Close client
@@ -333,23 +169,55 @@ async fn main() -> Result<()> {
 }
 ```
 
-运行示例 | Running the example:
+### Stdio 传输示例 | Stdio Transport Example
 
-```bash
-# 1. 首先编译服务器程序 | First, build the server
-cargo build --example stdio_server
+[查看完整示例代码](examples/stdio_example.rs)
+[See full example code](examples/stdio_example.rs)
 
-# 2. 然后运行客户端程序 | Then run the client
-cargo run --example stdio_client
-```
+### 生命周期示例 | Lifecycle Example
 
-客户端会自动启动服务器进程并通过标准输入/输出进行通信。
-The client will automatically start the server process and communicate through stdin/stdout.
+[查看完整示例代码](examples/lifecycle_example.rs)
+[See full example code](examples/lifecycle_example.rs)
+
+## HTTP/SSE 传输特性 | HTTP/SSE Transport Features
+
+### 客户端管理 | Client Management
+
+- 基于 SSE 的客户端连接管理
+- 自动清理断开的连接
+- 保持连接活跃检测
+- 支持客户端重连机制
+
+- SSE-based client connection management
+- Automatic cleanup of disconnected clients
+- Keep-alive connection detection
+- Support for client reconnection
+
+### 消息路由 | Message Routing
+
+- 基于请求 ID 的消息路由
+- 支持请求-响应模式
+- 支持通知消息
+- 自动清理断开的连接
+
+- Request ID based message routing
+- Support for request-response pattern
+- Support for notification messages
+- Automatic cleanup of disconnected connections
+
+### 安全性 | Security
+
+- 支持 Bearer Token 认证
+- 安全的消息传输
+- 连接状态监控
+
+- Bearer Token authentication support
+- Secure message transmission
+- Connection state monitoring
 
 ## 自定义传输实现 | Custom Transport Implementation
 
 你可以通过实现 `Transport` trait 来创建自己的传输层：
-
 You can create your own transport layer by implementing the `Transport` trait:
 
 ```rust
@@ -390,257 +258,29 @@ impl Transport for MyTransport {
 }
 ```
 
-### 生命周期示例 | Lifecycle Example
-
-首先创建服务器程序 `examples/lifecycle_server.rs`：
-First create the server program `examples/lifecycle_server.rs`:
-
-```rust
-use mcprotocol_rs::{
-    error_codes,
-    protocol::ServerCapabilities,
-    transport::{ServerTransportFactory, TransportConfig, TransportType},
-    ImplementationInfo, Message, Response, ResponseError, Result, PROTOCOL_VERSION,
-};
-use serde_json::json;
-use std::collections::HashSet;
-use tokio;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // 跟踪会话中使用的请求 ID
-    // Track request IDs used in the session
-    let mut session_ids = HashSet::new();
-
-    // 配置 Stdio 服务器
-    // Configure Stdio server
-    let config = TransportConfig {
-        transport_type: TransportType::Stdio {
-            server_path: None,
-            server_args: None,
-        },
-        parameters: None,
-    };
-
-    // 创建服务器实例
-    // Create server instance
-    let factory = ServerTransportFactory;
-    let mut server = factory.create(config)?;
-    let mut initialized = false;
-
-    // 启动服务器
-    // Start server
-    eprintln!("Server starting...");
-    server.initialize().await?;
-
-    // 处理消息循环
-    // Message handling loop
-    loop {
-        match server.receive().await {
-            Ok(message) => {
-                match message {
-                    Message::Request(request) => {
-                        // 验证请求 ID 的唯一性
-                        // Validate request ID uniqueness
-                        if !request.validate_id_uniqueness(&mut session_ids) {
-                            let error = ResponseError {
-                                code: error_codes::INVALID_REQUEST,
-                                message: "Request ID has already been used".to_string(),
-                                data: None,
-                            };
-                            let response = Response::error(error, request.id);
-                            server.send(Message::Response(response)).await?;
-                            continue;
-                        }
-
-                        match request.method.as_str() {
-                            "initialize" => {
-                                // 处理初始化请求
-                                // Handle initialize request
-                                // ... initialization logic ...
-                            }
-                            "shutdown" => {
-                                if !initialized {
-                                    // 如果未初始化，发送错误
-                                    // If not initialized, send error
-                                    let error = ResponseError {
-                                        code: error_codes::SERVER_NOT_INITIALIZED,
-                                        message: "Server not initialized".to_string(),
-                                        data: None,
-                                    };
-                                    let response = Response::error(error, request.id);
-                                    server.send(Message::Response(response)).await?;
-                                    continue;
-                                }
-                                // ... shutdown logic ...
-                            }
-                            _ => {
-                                // ... handle other requests ...
-                            }
-                        }
-                    }
-                    Message::Notification(notification) => {
-                        match notification.method.as_str() {
-                            "initialized" => {
-                                eprintln!("Server initialized");
-                                initialized = true;
-                            }
-                            "exit" => {
-                                eprintln!("Received exit notification");
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Err(e) => {
-                eprintln!("Error receiving message: {}", e);
-                break;
-            }
-        }
-    }
-
-    server.close().await?;
-    Ok(())
-}
-```
-
-然后创建客户端程序 `examples/lifecycle_client.rs`：
-Then create the client program `examples/lifecycle_client.rs`:
-
-```rust
-use mcprotocol_rs::{
-    transport::{ClientTransportFactory, TransportConfig, TransportType},
-    ClientCapabilities, ImplementationInfo, Message, Method, Notification, Request, RequestId,
-    Result, PROTOCOL_VERSION,
-};
-use serde_json::json;
-use std::{collections::HashSet, env};
-use tokio;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // 跟踪会话中使用的请求 ID
-    // Track request IDs used in the session
-    let mut session_ids = HashSet::new();
-
-    // 获取服务器程序路径
-    // Get server program path
-    let server_path = env::current_dir()?.join("target/debug/examples/lifecycle_server");
-
-    // 配置 Stdio 客户端
-    // Configure Stdio client
-    let config = TransportConfig {
-        transport_type: TransportType::Stdio {
-            server_path: Some(server_path.to_str().unwrap().to_string()),
-            server_args: None,
-        },
-        parameters: None,
-    };
-
-    // 创建客户端实例
-    // Create client instance
-    let factory = ClientTransportFactory;
-    let mut client = factory.create(config)?;
-
-    // 初始化客户端
-    // Initialize client
-    client.initialize().await?;
-
-    // 发送初始化请求
-    // Send initialize request
-    let init_request = Request::new(
-        Method::Initialize,
-        Some(json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": ClientCapabilities {
-                roots: None,
-                sampling: None,
-                experimental: None,
-            },
-            "clientInfo": ImplementationInfo {
-                name: "Example Client".to_string(),
-                version: "1.0.0".to_string(),
-            }
-        })),
-        RequestId::Number(1),
-    );
-
-    // 验证请求 ID 的唯一性
-    // Validate request ID uniqueness
-    if !init_request.validate_id_uniqueness(&mut session_ids) {
-        eprintln!("Request ID has already been used in this session");
-        return Ok(());
-    }
-
-    client.send(Message::Request(init_request)).await?;
-
-    // 等待初始化响应并处理
-    // Wait for and handle initialization response
-    // ... handle response ...
-
-    // 发送关闭请求
-    // Send shutdown request
-    let shutdown_request = Request::new(Method::Shutdown, None, RequestId::Number(2));
-    
-    // 验证请求 ID 的唯一性
-    // Validate request ID uniqueness
-    if !shutdown_request.validate_id_uniqueness(&mut session_ids) {
-        eprintln!("Request ID has already been used in this session");
-        return Ok(());
-    }
-
-    client.send(Message::Request(shutdown_request)).await?;
-
-    // 发送退出通知
-    // Send exit notification
-    let exit_notification = Notification::new(Method::Exit, None);
-    client.send(Message::Notification(exit_notification)).await?;
-
-    client.close().await?;
-    Ok(())
-}
-```
-
-运行生命周期示例 | Running the lifecycle example:
-
-```bash
-# 1. 首先编译服务器程序 | First, build the server
-cargo build --example lifecycle_server
-
-# 2. 然后运行客户端程序 | Then run the client
-cargo run --example lifecycle_client
-```
-
-这个示例展示了完整的 MCP 生命周期，包括：
-This example demonstrates the complete MCP lifecycle, including:
-
-- 初始化阶段（initialize 请求和 initialized 通知）
-- 会话 ID 跟踪和验证
-- 版本协商
-- 优雅关闭（shutdown 请求和 exit 通知）
-
-- Initialization phase (initialize request and initialized notification)
-- Session ID tracking and validation
-- Version negotiation
-- Graceful shutdown (shutdown request and exit notification)
-
 ## 项目结构 | Project Structure
 
 ```
 src/
-├── client/           # 客户端实现 | Client implementation
-├── server/           # 服务器实现 | Server implementation
 ├── protocol/         # MCP 协议实现 | MCP protocol implementation
-└── transport/        # 传输层实现 | Transport layer implementation
-    ├── http/         # HTTP/SSE 传输 | HTTP/SSE transport
-    │   ├── client.rs # HTTP 客户端 | HTTP client
-    │   └── server.rs # HTTP 服务器 | HTTP server
-    └── stdio/        # 标准输入/输出传输 | Stdio transport
-        ├── client.rs # Stdio 客户端 | Stdio client
-        └── server.rs # Stdio 服务器 | Stdio server
+├── transport/        # 传输层实现 | Transport layer implementation
+│   ├── http/        # HTTP/SSE 传输 | HTTP/SSE transport
+│   │   ├── client.rs # HTTP 客户端 | HTTP client
+│   │   └── server.rs # HTTP 服务器 | HTTP server
+│   └── stdio/       # 标准输入/输出传输 | Stdio transport
+│       ├── client.rs # Stdio 客户端 | Stdio client
+│       └── server.rs # Stdio 服务器 | Stdio server
+├── client_features/ # 客户端特性实现 | Client features implementation
+├── server_features/ # 服务器特性实现 | Server features implementation
+├── error.rs        # 错误类型定义 | Error type definitions
+└── lib.rs          # 库入口和导出 | Library entry and exports
+
+examples/
+├── ping_example.rs      # Ping/Pong 示例 | Ping/Pong example
+├── lifecycle_client.rs  # 生命周期客户端示例 | Lifecycle client example
+├── lifecycle_server.rs  # 生命周期服务器示例 | Lifecycle server example
+├── stdio_client.rs      # 标准输入/输出客户端示例 | Stdio client example
+└── stdio_server.rs      # 标准输入/输出服务器示例 | Stdio server example
 ```
 
 ## 贡献 | Contributing
